@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Street Runner Enhanced</title>
+  <style>
+    body { margin: 0; overflow: hidden; font-family: Arial, sans-serif; background-color: #000; }
+    #game-container { position: relative; width: 100%; height: 100vh; }
+    #score-container { position: absolute; top: 20px; left: 20px; color: #fff; font-size: 24px; font-weight: bold; text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.7); z-index: 10; }
+    #start-screen, #game-over { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; background-color: rgba(0, 0, 0, 0.75); color: white; z-index: 100; text-align: center; }
+    #game-over { display: none; background-color: rgba(0, 0, 0, 0.85); } /* Initially hidden */
+    h1 { font-size: 60px; margin-bottom: 20px; color: #fff; text-shadow: 0 0 10px #00aaff, 0 0 20px #00aaff, 0 0 30px #00aaff; }
+    #start-screen p { font-size: 24px; margin-bottom: 30px; }
+    h2 { font-size: 50px; margin-bottom: 20px; color: #ff4444; text-shadow: 0 0 10px #ff4444, 0 0 20px #ff4444, 0 0 30px #ff4444; }
+    #final-score { font-size: 36px; margin-bottom: 30px; }
+    button { color: white; border: none; padding: 15px 30px; font-size: 20px; border-radius: 5px; cursor: pointer; transition: all 0.3s ease; box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3); }
+    #start-button { background-color: #0088cc; box-shadow: 0 4px 8px rgba(0, 136, 204, 0.4); }
+    #start-button:hover { background-color: #006fa3; transform: scale(1.05); box-shadow: 0 6px 12px rgba(0, 136, 204, 0.6); }
+    #restart-button { background-color: #cc3333; box-shadow: 0 4px 8px rgba(204, 51, 51, 0.4); }
+    #restart-button:hover { background-color: #a32929; transform: scale(1.05); box-shadow: 0 6px 12px rgba(204, 51, 51, 0.6); }
+    .controls-hint { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); color: #fff; font-size: 16px; text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8); z-index: 10; width: 100%; text-align: center; display: none; /* Hidden initially */ }
+    #start-screen .controls-hint-static { position: relative; bottom: auto; left: auto; transform: none; margin-top: 40px; display: block !important; }
+  </style>
+</head>
+<body>
+  <div id="game-container">
+    <div id="score-container">Score: <span id="score">0</span></div>
+    <div id="start-screen">
+      <h1>STREET RUNNER</h1>
+      <p>Dodge obstacles, collect coins, watch out for moving coins!</p>
+      <button id="start-button">START GAME</button>
+      <div class="controls-hint controls-hint-static">Use A/D or Left/Right arrows to move. W, Up arrow or Space to Jump.</div>
+    </div>
+    <div id="game-over">
+      <h2>GAME OVER</h2>
+      <div id="final-score">Score: 0</div>
+      <button id="restart-button">PLAY AGAIN</button>
+    </div>
+    <div class="controls-hint" id="game-controls-hint">Use A/D or Left/Right arrows to move. W, Up arrow or Space to Jump.</div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    // Wait for DOM content and Three.js
+    window.addEventListener('DOMContentLoaded', (event) => {
+      if (typeof THREE === 'undefined') {
+        console.error('THREE is not defined. Make sure Three.js library is loaded correctly.');
+        alert('Error loading Three.js library. Please check console for details.');
+        return;
+      }
+      initGame();
+    });
+
+    // --- Game Variables ---
+    let scene, camera, renderer, player;
+    let score = 0;
+    let gameSpeed = 0.2; // Initial game speed
+    let isGameRunning = false;
+    let animationFrameId = null;
+    let lastTime = 0;
+    let deltaTime = 0; // Time since last frame in seconds
+    const lanes = [-2, 0, 2]; // X coordinates for the lanes
+    let currentLane = 1; // Start in the middle lane (index 1)
+    let playerJumping = false;
+    let jumpProgress = 0;
+    const JUMP_HEIGHT = 2.5;
+    const JUMP_DURATION = 0.6;
+
+    // --- Game Objects & Environment ---
+    let road;
+    let buildings = [];
+    let obstacles = [];
+    let coins = [];
+    let trees = [];
+    const ROAD_LENGTH = 300; // Consistent road length
+    const RECYCLE_Z = 15;    // Z position slightly ahead of camera where objects get recycled
+    const SPAWN_Z_BASE = -180; // Base Z where objects start spawning (further back)
+
+    // --- Spacing & Balance Variables ---
+    let lastObstacleSpawnZ = SPAWN_Z_BASE + 50; // Initialize far back
+    let lastCoinSpawnZ = SPAWN_Z_BASE + 50;
+    const MIN_Z_SPACING_OBSTACLE = 18; // Increased min distance between obstacles
+    const MIN_Z_SPACING_COIN = 8;      // Min distance between start of coin clusters
+    let lastObstacleLanesInfo = { lane: -1, z: -Infinity }; // Track last obstacle [laneIndex, zPos]
+    const Z_ADJACENCY_THRESHOLD = 12; // How close in Z counts as 'simultaneous' for adjacent check
+
+    let obstacleSpawnCounter = 0; // Count consecutive obstacles for gap forcing
+    const MAX_CONSECUTIVE_OBSTACLES = 5; // Max obstacles before forcing a gap
+    const FORCED_GAP_Z_OBSTACLE = 45; // How long the forced gap should be
+
+    // --- DOM elements ---
+    const scoreElement = document.getElementById('score');
+    const finalScoreElement = document.getElementById('final-score');
+    const startScreen = document.getElementById('start-screen');
+    const gameOverScreen = document.getElementById('game-over');
+    const startButton = document.getElementById('start-button');
+    const restartButton = document.getElementById('restart-button');
+    const gameControlsHint = document.getElementById('game-controls-hint');
+
+    // --- Event Listeners ---
+    startButton.addEventListener('click', startGame);
+    restartButton.addEventListener('click', restartGame);
+
+    // --- Initialization ---
+    function init() {
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x87CEEB);
+      scene.fog = new THREE.Fog(0x87CEEB, 60, 180); // Adjusted fog
+
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 1000);
+      camera.position.set(0, 5, 9); // Slightly adjusted camera
+      camera.lookAt(0, 2, 0);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      document.getElementById('game-container').appendChild(renderer.domElement);
+
+      // Lights
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.65);
+      scene.add(ambientLight);
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 0.85);
+      directionalLight.position.set(20, 35, 25);
+      directionalLight.castShadow = true;
+      directionalLight.shadow.camera.left = -35; directionalLight.shadow.camera.right = 35;
+      directionalLight.shadow.camera.top = 35; directionalLight.shadow.camera.bottom = -35;
+      directionalLight.shadow.mapSize.width = 1024; directionalLight.shadow.mapSize.height = 1024;
+      directionalLight.shadow.bias = -0.002;
+      scene.add(directionalLight);
+
+      createEnvironment();
+      createPlayer();
+
+      window.addEventListener('resize', onWindowResize);
+      document.addEventListener('keydown', handleKeyDown);
+    }
+
+    function createEnvironment() {
+        const groundGeometry = new THREE.PlaneGeometry(150, ROAD_LENGTH + 100); // Wider ground
+        const groundMaterial = new THREE.MeshStandardMaterial({ color: 0x55aa55, roughness: 0.9, metalness: 0.1 });
+        const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+        ground.rotation.x = -Math.PI / 2; ground.position.y = -0.05;
+        ground.position.z = -ROAD_LENGTH / 2; ground.receiveShadow = true;
+        scene.add(ground);
+
+        const roadGeometry = new THREE.PlaneGeometry(6, ROAD_LENGTH);
+        const roadMaterial = new THREE.MeshStandardMaterial({ color: 0x444444, roughness: 0.8 });
+        road = new THREE.Mesh(roadGeometry, roadMaterial);
+        road.rotation.x = -Math.PI / 2;
+        road.position.z = -ROAD_LENGTH / 2 + 50; // Adjust so player starts near Z=0
+        road.receiveShadow = true;
+        scene.add(road);
+
+        // Road markings
+        const lineGeometry = new THREE.PlaneGeometry(0.15, 4);
+        const lineMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff });
+        const numLines = Math.floor(ROAD_LENGTH / 8);
+        for (let i = 0; i < numLines; i++) {
+            [-1, 1].forEach(laneX => { // Create lines for both dashed lane markers
+                const line = new THREE.Mesh(lineGeometry.clone(), lineMaterial.clone());
+                line.rotation.x = -Math.PI / 2;
+                line.position.set(laneX, 0.01, -i * 8); // Start markings from Z=0 backwards
+                line.userData.isRoadMarking = true;
+                road.add(line); // Add to road for relative movement
+            });
+        }
+
+        // Sidewalks
+        const sidewalkGeometry = new THREE.BoxGeometry(2, 0.2, ROAD_LENGTH);
+        const sidewalkMaterial = new THREE.MeshStandardMaterial({ color: 0xaaaaaa });
+        [-1, 1].forEach(side => {
+            const sidewalk = new THREE.Mesh(sidewalkGeometry, sidewalkMaterial);
+            sidewalk.position.set(4 * side, 0.1, road.position.z);
+            sidewalk.receiveShadow = true;
+            sidewalk.userData.isSidewalk = true; // Mark for potential recycling if needed
+            scene.add(sidewalk);
+        });
+
+
+      // Initial buildings and trees
+      const initialObjectDensity = 20; // How many pairs to generate initially
+      for (let i = 0; i < initialObjectDensity; i++) {
+          const zPos = -20 - i * (ROAD_LENGTH / initialObjectDensity);
+          createBuilding(-7 - Math.random() * 8, zPos); // Left side buildings
+          createBuilding(7 + Math.random() * 8, zPos);  // Right side buildings
+          if (i % 2 === 0) {
+             createTree(-5.5 - Math.random(), zPos + 10); // Left side trees
+             createTree(5.5 + Math.random(), zPos - 5);   // Right side trees
+          }
+      }
+    }
+
+    function createBuilding(x, z) {
+      const height = 5 + Math.random() * 15;
+      const width = 3 + Math.random() * 4;
+      const depth = 3 + Math.random() * 4;
+      const buildingGeometry = new THREE.BoxGeometry(width, height, depth);
+      const buildingMaterial = new THREE.MeshStandardMaterial({
+        color: new THREE.Color(0.6 + Math.random() * 0.4, 0.6 + Math.random() * 0.4, 0.6 + Math.random() * 0.4),
+        roughness: 0.8, metalness: 0.2
+      });
+      const building = new THREE.Mesh(buildingGeometry, buildingMaterial);
+      building.position.set(x, height / 2, z);
+      building.castShadow = true; building.receiveShadow = true;
+      building.userData.isBuilding = true;
+      scene.add(building);
+      buildings.push(building);
+      return building;
+    }
+
+    function createTree(x, z) {
+        const treeGroup = new THREE.Group();
+        treeGroup.position.set(x, 0, z);
+        const trunkHeight = 1 + Math.random() * 0.5;
+        const trunkGeometry = new THREE.CylinderGeometry(0.15, 0.2, trunkHeight, 8);
+        const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x8B4513 });
+        const trunk = new THREE.Mesh(trunkGeometry, trunkMaterial);
+        trunk.position.y = trunkHeight / 2; trunk.castShadow = true;
+        treeGroup.add(trunk);
+        const foliageHeight = 1.5 + Math.random();
+        const foliageRadius = 0.8 + Math.random() * 0.4;
+        const foliageGeometry = new THREE.IcosahedronGeometry(foliageRadius, 0);
+        const foliageMaterial = new THREE.MeshStandardMaterial({ color: 0x228B22, roughness: 0.8, flatShading: true });
+        const foliage = new THREE.Mesh(foliageGeometry, foliageMaterial);
+        foliage.position.y = trunkHeight + foliageHeight * 0.4; foliage.castShadow = true;
+        treeGroup.add(foliage);
+        treeGroup.userData.isTree = true;
+        scene.add(treeGroup);
+        trees.push(treeGroup);
+        return treeGroup;
+    }
+
+    function createPlayer() {
+        const playerGroup = new THREE.Group();
+        playerGroup.position.set(lanes[currentLane], 0.5, 0);
+        const playerBodyMaterial = new THREE.MeshStandardMaterial({ color: 0xFF5733, roughness: 0.6 });
+        const bodyGeometry = new THREE.BoxGeometry(0.7, 0.7, 0.4);
+        const body = new THREE.Mesh(bodyGeometry, playerBodyMaterial); body.castShadow = true;
+        playerGroup.add(body);
+        const headGeometry = new THREE.BoxGeometry(0.4, 0.4, 0.4);
+        const head = new THREE.Mesh(headGeometry, playerBodyMaterial);
+        head.position.y = 0.55; head.castShadow = true;
+        playerGroup.add(head);
+        playerGroup.userData.limbs = {}; // Store limb references
+        playerGroup.userData.limbs.leftArm = createLimb(0.15, 0.6, 0.15, 0.42, 0.1, 0, playerGroup, playerBodyMaterial);
+        playerGroup.userData.limbs.rightArm = createLimb(0.15, 0.6, 0.15, -0.42, 0.1, 0, playerGroup, playerBodyMaterial);
+        playerGroup.userData.limbs.leftLeg = createLimb(0.2, 0.7, 0.2, 0.18, -0.7, 0, playerGroup, playerBodyMaterial);
+        playerGroup.userData.limbs.rightLeg = createLimb(0.2, 0.7, 0.2, -0.18, -0.7, 0, playerGroup, playerBodyMaterial);
+        player = playerGroup;
+        scene.add(player);
+    }
+
+    function createLimb(width, height, depth, x, y, z, parent, material) {
+        const geometry = new THREE.BoxGeometry(width, height, depth);
+        const limb = new THREE.Mesh(geometry, material);
+        limb.position.set(x, y, z); limb.castShadow = true;
+        parent.add(limb);
+        return limb;
+    }
+
+    // --- Spawning Logic with Spacing & Balance ---
+    function spawnObstacle() {
+        const spawnChance = Math.min(0.5 + gameSpeed * 0.15, 0.85); // Adjusted chance
+        const proposedZ = SPAWN_Z_BASE - Math.random() * 30; // Where we *might* spawn it
+
+        // --- Spacing & Gap Check ---
+        let requiredMinSpacing = MIN_Z_SPACING_OBSTACLE;
+        if (obstacleSpawnCounter >= MAX_CONSECUTIVE_OBSTACLES) {
+            requiredMinSpacing = FORCED_GAP_Z_OBSTACLE; // Enforce a larger gap
+        }
+        if (Math.random() > spawnChance * deltaTime * 10 || Math.abs(proposedZ - lastObstacleSpawnZ) < requiredMinSpacing) {
+            return; // Skip based on chance or Z spacing
+        }
+        // If we were forcing a gap and the spacing check passed, reset the counter
+        if (obstacleSpawnCounter >= MAX_CONSECUTIVE_OBSTACLES) {
+             obstacleSpawnCounter = 0;
+             // console.log("Forcing obstacle gap - Resuming normal spawn.");
+        }
+
+        let lane = Math.floor(Math.random() * 3);
+
+        // --- Adjacent Lane Conflict Check ---
+        // Avoid spawning too close to the last obstacle if it's in an adjacent lane
+        if (Math.abs(proposedZ - lastObstacleLanesInfo.z) < Z_ADJACENCY_THRESHOLD) {
+            if ( Math.abs(lane - lastObstacleLanesInfo.lane) === 1 ) { // Is it adjacent?
+                 // console.log(`Adjacent conflict avoided: new lane ${lane}, last lane ${lastObstacleLanesInfo.lane} at Z ~${proposedZ.toFixed(1)}`);
+                 return; // Skip spawn if adjacent conflict detected
+            }
+        }
+        // --- End Adjacent Lane Check ---
+
+        const obstacleTypes = [
+            { geometry: new THREE.BoxGeometry(0.8, 0.8, 0.8), color: 0xE74C3C },
+            { geometry: new THREE.BoxGeometry(1.6, 0.5, 0.7), color: 0x3498DB }, // Wider barrier
+            { geometry: new THREE.ConeGeometry(0.6, 1.2, 8), color: 0xf39c12 }  // Taller cone
+        ];
+        const type = obstacleTypes[Math.floor(Math.random() * obstacleTypes.length)];
+        const obstacleMaterial = new THREE.MeshStandardMaterial({ color: type.color, roughness: 0.7 });
+        const obstacle = new THREE.Mesh(type.geometry, obstacleMaterial);
+        const yPosition = type.geometry.parameters.height / 2 + 0.01; // Slightly above ground
+
+        obstacle.position.set(lanes[lane], yPosition, proposedZ);
+        obstacle.castShadow = true;
+        obstacle.userData.isObstacle = true;
+        scene.add(obstacle);
+        obstacles.push(obstacle);
+
+        // Update last spawn info & counter
+        lastObstacleSpawnZ = proposedZ;
+        lastObstacleLanesInfo = { lane: lane, z: proposedZ };
+        obstacleSpawnCounter++; // Increment counter for successful spawn
+    }
+
+    function spawnCoin() {
+        const spawnChance = Math.min(0.6 + gameSpeed * 0.1, 0.9); // Adjusted chance
+        const proposedZ = SPAWN_Z_BASE - Math.random() * 40; // Where the *first* coin might spawn
+
+        // --- Spacing Check (Coins) ---
+        if (Math.random() > spawnChance * deltaTime * 15 || Math.abs(proposedZ - lastCoinSpawnZ) < MIN_Z_SPACING_COIN) {
+             return; // Skip based on chance or Z spacing from last coin cluster
+        }
+
+        const lane = Math.floor(Math.random() * 3);
+        const clusterSize = Math.random() < 0.15 ? 5 : (Math.random() < 0.3 ? 3 : 1); // More chance for clusters
+        const startZ = proposedZ;
+        const yPosition = 1 + Math.random() * 0.5; // Randomize Y slightly per cluster
+
+        // --- Oscillation Data ---
+        const isOscillating = clusterSize > 1 && Math.random() < 0.4; // 40% chance for *clusters* to oscillate
+        const oscillationAmplitude = isOscillating ? 0.5 + Math.random() * 0.4 : 0; // Sideways range
+        const oscillationSpeed = isOscillating ? 1.8 + Math.random() * 1.2 : 0; // Speed of oscillation
+
+        // --- Coin Geometry/Material (Define once) ---
+        const coinGeometry = new THREE.CylinderGeometry(0.4, 0.4, 0.08, 16);
+        const coinMaterial = new THREE.MeshStandardMaterial({
+            color: 0xFFD700, metalness: 0.6, roughness: 0.4,
+            emissive: 0xccaa00, emissiveIntensity: 0.3
+        });
+
+        let spawnedAnyCoins = false;
+        for (let i = 0; i < clusterSize; i++) {
+            const coin = new THREE.Mesh(coinGeometry, coinMaterial); // Reuse geometry/material
+            const currentCoinZ = startZ - i * 1.8; // Space out coins within a cluster
+
+            coin.rotation.x = Math.PI / 2;
+            coin.position.set(lanes[lane], yPosition, currentCoinZ);
+            coin.castShadow = true;
+            coin.userData.isCoin = true;
+
+            // Store oscillation data for dynamic movement
+            coin.userData.isOscillating = isOscillating;
+            coin.userData.oscillationAmplitude = oscillationAmplitude;
+            coin.userData.oscillationSpeed = oscillationSpeed;
+            coin.userData.baseX = lanes[lane]; // Store original lane X for oscillation center
+            coin.userData.oscillationOffset = Math.random() * Math.PI * 2; // Random start phase
+
+            scene.add(coin);
+            coins.push(coin);
+            spawnedAnyCoins = true;
+        }
+
+        // Update last spawn Z & potentially reset obstacle counter
+        if(spawnedAnyCoins) {
+            lastCoinSpawnZ = startZ;
+            // Allow obstacles slightly sooner after coins
+            obstacleSpawnCounter = Math.max(0, obstacleSpawnCounter - 1);
+        }
+    }
+
+
+    // --- Player Controls ---
+    function handleKeyDown(event) {
+        if (!isGameRunning) return; // Only handle keys if game is running
+
+        let targetLane = currentLane;
+        // Move left
+        if ((event.key === 'ArrowLeft' || event.key.toLowerCase() === 'a') && currentLane > 0) {
+            targetLane--;
+        }
+        // Move right
+        else if ((event.key === 'ArrowRight' || event.key.toLowerCase() === 'd') && currentLane < 2) {
+            targetLane++;
+        }
+        // Jump (only if not already jumping)
+        else if ((event.key === 'ArrowUp' || event.key.toLowerCase() === 'w' || event.key === ' ') && !playerJumping) {
+            playerJumping = true;
+            jumpProgress = 0; // Reset jump progress
+        }
+
+        // Update player's target lane if it changed
+        if (targetLane !== currentLane) {
+           currentLane = targetLane;
+        }
+    }
+
+    // --- Game Loop Updates ---
+    function updatePlayerPosition(dt) {
+        if (!player) return;
+
+        // Smooth Lane Transition (Lerp)
+        const targetX = lanes[currentLane];
+        player.position.x = THREE.MathUtils.lerp(player.position.x, targetX, dt * 12); // Slightly faster lerp
+
+        // Jumping Logic (Parabolic curve based on time)
+        let currentJumpHeight = 0;
+        if (playerJumping) {
+            jumpProgress += dt / JUMP_DURATION;
+            currentJumpHeight = JUMP_HEIGHT * 4 * (jumpProgress - jumpProgress * jumpProgress); // Parabola
+            if (jumpProgress >= 1) {
+                playerJumping = false; jumpProgress = 0; currentJumpHeight = 0;
+            }
+        }
+        player.position.y = 0.5 + currentJumpHeight; // Base height + jump height
+
+        // Running Animation (Sine wave based on time and speed)
+        const runCycle = Date.now() * 0.01 * (gameSpeed * 5 + 1.5); // Faster base animation
+        const angle = Math.sin(runCycle) * 0.45; // Slightly larger swing
+
+        if (player.userData.limbs) {
+            if (!playerJumping) { // Animate limbs only when on the ground
+               player.userData.limbs.leftArm.rotation.x = angle; player.userData.limbs.rightArm.rotation.x = -angle;
+               player.userData.limbs.leftLeg.rotation.x = -angle * 1.2; player.userData.limbs.rightLeg.rotation.x = angle * 1.2;
+            } else { // Optional: Hold a pose during jump
+               player.userData.limbs.leftArm.rotation.x = 0.2; player.userData.limbs.rightArm.rotation.x = -0.2;
+               player.userData.limbs.leftLeg.rotation.x = -0.2; player.userData.limbs.rightLeg.rotation.x = 0.2;
+            }
+        }
+    }
+
+    function moveObjects(dt) {
+        const effectiveGameSpeed = gameSpeed * 60 * dt; // Frame-rate independent speed
+        const playerBox = new THREE.Box3().setFromObject(player); // Player bounds for collision
+
+        // Move Road Markings (relative to road)
+        if (road && road.children) {
+             road.children.forEach(child => {
+                if (child.userData.isRoadMarking) {
+                    child.position.z += effectiveGameSpeed;
+                    if (child.position.z > 10) { // Check if passed front edge
+                         child.position.z -= ROAD_LENGTH; // Move it to the back of the defined road segment
+                     }
+                }
+            });
+        }
+
+        // --- Move Obstacles ---
+        for (let i = obstacles.length - 1; i >= 0; i--) {
+            const obstacle = obstacles[i];
+            obstacle.position.z += effectiveGameSpeed;
+
+            // Recycle obstacles far behind
+            if (obstacle.position.z > RECYCLE_Z) {
+                scene.remove(obstacle); obstacles.splice(i, 1);
+            }
+            // Collision Check (only when close)
+            else if (obstacle.position.z > player.position.z - 1.5 && obstacle.position.z < player.position.z + 1) { // Slightly larger check box
+                const obstacleBox = new THREE.Box3().setFromObject(obstacle);
+                if (playerBox.intersectsBox(obstacleBox)) {
+                    gameOver(); return; // Stop processing on game over
+                }
+            }
+        }
+
+        // --- Move Coins (with Oscillation) ---
+        const timeFactor = performance.now() * 0.001; // Global time for oscillation
+        for (let i = coins.length - 1; i >= 0; i--) {
+            const coin = coins[i];
+            coin.position.z += effectiveGameSpeed;
+            coin.rotation.y += dt * 2.5; // Spin faster
+
+            // Apply Dynamic Oscillation Movement
+            if (coin.userData.isOscillating) {
+                const oscillation = Math.sin(
+                     (timeFactor + coin.userData.oscillationOffset) // Use time + random offset
+                      * coin.userData.oscillationSpeed)
+                      * coin.userData.oscillationAmplitude;
+                coin.position.x = coin.userData.baseX + oscillation;
+            }
+
+            // Recycle coins far behind
+            if (coin.position.z > RECYCLE_Z) {
+                scene.remove(coin); coins.splice(i, 1);
+            }
+            // Collection Check (only when close)
+            else if (coin.position.z > player.position.z - 1 && coin.position.z < player.position.z + 1) {
+                const coinBox = new THREE.Box3().setFromObject(coin); // Gets current position including oscillation
+                const expandedPlayerBox = playerBox.clone().expandByScalar(0.15); // Easier collection hit box
+                if (expandedPlayerBox.intersectsBox(coinBox)) {
+                    scene.remove(coin); coins.splice(i, 1);
+                    score += 10; scoreElement.textContent = score;
+                    // Optional: Play coin collect sound
+                }
+            }
+        }
+
+        // --- Move Scenery (Parallax) ---
+        const FAR_SCENERY_MULTIPLIER = 0.4; // Moves slower
+        const MID_SCENERY_MULTIPLIER = 0.7; // Moves medium speed
+
+         buildings.forEach(building => {
+             const multiplier = Math.abs(building.position.x) > 12 ? FAR_SCENERY_MULTIPLIER : MID_SCENERY_MULTIPLIER; // Based on distance from center
+             building.position.z += effectiveGameSpeed * multiplier;
+             if (building.position.z > RECYCLE_Z) { // Recycle buildings
+                 const side = building.position.x < 0 ? -1 : 1;
+                 building.position.z = SPAWN_Z_BASE - 50 - Math.random() * 100; // Respawn further back
+                 building.position.x = (7 + Math.random() * 12) * side; // Randomize X position wider
+                 // Optional: Randomize building height/width on recycle
+             }
+         });
+
+         trees.forEach(tree => {
+             tree.position.z += effectiveGameSpeed * MID_SCENERY_MULTIPLIER; // Trees use mid-ground speed
+             if (tree.position.z > RECYCLE_Z) { // Recycle trees
+                 const side = tree.position.x < 0 ? -1 : 1;
+                  tree.position.z = SPAWN_Z_BASE - 20 - Math.random() * 80;
+                  tree.position.x = (5.5 + Math.random() * 2.5) * side;
+             }
+         });
+    }
+
+    // --- Game Loop ---
+    function gameLoop(currentTime) {
+        if (!isGameRunning) return;
+        animationFrameId = requestAnimationFrame(gameLoop);
+
+        const now = performance.now();
+        deltaTime = (now - (lastTime || now)) / 1000;
+        lastTime = now;
+        deltaTime = Math.min(deltaTime, 0.1); // Clamp delta time
+
+        // Increase game speed (adjust multiplier for difficulty curve)
+        gameSpeed += deltaTime * 0.018; // Slightly faster increase
+
+        // Update score based on time and speed
+        score += Math.floor(deltaTime * 12 * (1 + gameSpeed * 0.5)); // Adjusted score calculation
+        scoreElement.textContent = score;
+
+        // Spawn new obstacles and coins
+        spawnObstacle();
+        spawnCoin();
+
+        // Update player and objects
+        updatePlayerPosition(deltaTime);
+        moveObjects(deltaTime);
+
+        renderer.render(scene, camera);
+    }
+
+    // --- Game State Management ---
+    function startGame() {
+        score = 0; scoreElement.textContent = score;
+        gameSpeed = 0.2; // Reset speed
+        currentLane = 1; // Reset lane
+        if (player) { // Reset player state if exists
+          player.position.set(lanes[currentLane], 0.5, 0);
+          player.rotation.set(0, 0, 0); // Reset any accidental rotation
+          playerJumping = false; jumpProgress = 0;
+          // Reset limb rotations immediately
+          if (player.userData.limbs) {
+              Object.values(player.userData.limbs).forEach(limb => limb.rotation.set(0,0,0));
+          }
+        }
+        lastTime = performance.now(); // Reset timer
+        isGameRunning = true;
+
+        // Reset spacing/balance trackers
+        lastObstacleSpawnZ = SPAWN_Z_BASE + 50;
+        lastCoinSpawnZ = SPAWN_Z_BASE + 50;
+        lastObstacleLanesInfo = { lane: -1, z: -Infinity };
+        obstacleSpawnCounter = 0;
+
+        // Clear existing objects (important for restart)
+        clearDynamicObjects();
+
+        // UI updates
+        startScreen.style.display = 'none';
+        gameOverScreen.style.display = 'none';
+        gameControlsHint.style.display = 'block';
+
+        // Start loop
+        if (animationFrameId) cancelAnimationFrame(animationFrameId);
+        animationFrameId = requestAnimationFrame(gameLoop);
+    }
+
+    function gameOver() {
+        isGameRunning = false;
+        if (animationFrameId) cancelAnimationFrame(animationFrameId);
+        animationFrameId = null;
+
+        // UI updates
+        finalScoreElement.textContent = `Score: ${score}`;
+        gameOverScreen.style.display = 'flex';
+        gameControlsHint.style.display = 'none';
+        // Optional: Play game over sound
+    }
+
+    function restartGame() {
+        // UI hidden immediately
+        gameOverScreen.style.display = 'none';
+        // startGame will handle clearing objects, resetting state, and starting loop
+        startGame();
+    }
+
+    function clearDynamicObjects() {
+        // Clear obstacles
+        obstacles.forEach(obstacle => scene.remove(obstacle));
+        obstacles = [];
+        // Clear coins
+        coins.forEach(coin => scene.remove(coin));
+        coins = [];
+
+        // Note: We don't clear buildings/trees as they are recycled in place
+        // If you added other dynamic elements, clear them here too.
+   }
+
+
+    // --- Utility Functions ---
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function initGame() {
+        init(); // Setup Three.js essentials
+        // Initial render to show the scene behind the start screen
+        if (scene && camera && renderer) {
+           renderer.render(scene, camera);
+        } else {
+            console.error("Initialization failed. Cannot perform initial render.");
+        }
+    }
+
+  </script>
+</body>
+</html>
